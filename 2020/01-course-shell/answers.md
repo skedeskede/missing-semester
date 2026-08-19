@@ -352,3 +352,68 @@ the target.
 
 A file with no shebang cannot be identified by the kernel and execution fails.
 Some shells then retry it themselves as a fallback, which masks the problem.
+
+## Exercise 10 — Extract the last-modified date
+
+```bash
+./semester | grep -i last-modified > ~/last-modified.txt
+cat ~/last-modified.txt
+last-modified: Sun, 09 Aug 2026 15:54:30 GMT
+```
+
+For this we use the pipe, `|`. The output of the program before `|` becomes the
+input of the program after it. There is no direct interaction between the
+programs — we are just redirecting stdout and stdin appropriately.
+
+The whole chain is called a **pipeline**. `grep` knows nothing about `curl`;
+neither knows about the file. Each stage reads stdin and writes stdout, and the
+shell wires them together. This is the composability the course is built around:
+small programs that do one thing, chained arbitrarily.
+
+Stages run concurrently rather than one finishing before the next starts.
+
+**`grep`** searches text for lines matching a pattern and prints the matching
+lines. Given no filename it reads stdin, which is what makes it usable in a
+pipeline. The `-i` flag makes the match case-insensitive: HTTP/2 lowercases
+header names, but HTTP/1.1 servers may return `Last-Modified`, and `-i` covers
+both.
+
+The `>` binds to the last command in the pipeline only. This is a parsing rule,
+not an ordering one: the shell splits the line on `|` into separate commands,
+and a redirection belongs to whichever command it sits inside. Written earlier
+it would redirect that stage instead — `./semester > file | grep x` sends
+`curl`'s output to the file and leaves `grep` with an empty stdin.
+
+## Exercise 11 — Read the battery level from /sys
+
+```bash
+cat /sys/class/power_supply/BAT1/capacity
+100
+```
+
+`/sys` is the mount point for **sysfs**, a filesystem that allows us to query
+the kernel directly for hardware information. Since the kernel is the only
+program that actually interacts with the hardware, this is how a normal program
+obtains a value like the current battery level.
+
+It is not files on disk. Each path is a view into a kernel data structure, and
+the value is generated at the moment it is read — so `cat` returns the live
+figure, not a cached one. The design point is that hardware state is exposed
+through the same interface as everything else, so every text tool applies
+without knowing anything about batteries. This is the Unix principle that
+**everything is a file**.
+
+Under `/sys/class/power_supply/`, `AC1` is the mains adapter and `BAT1` the
+battery. Two files answer this exercise:
+
+- `capacity` — a percentage, `100`
+- `capacity_level` — a coarse label, `Full` (also `Normal`, `Low`, `Critical`)
+
+`capacity` is the right choice. It is machine-readable: `100` can be compared,
+thresholded, plotted. `Full` can only be printed. sysfs often exposes both a
+precise numeric value and a human-friendly summary; take the numeric one
+whenever anything downstream will process it.
+
+Note that WSL2 does expose battery information, which is not guaranteed for a
+virtual machine. `/sys/class/thermal/` lists cooling devices but no usable
+CPU temperature.
