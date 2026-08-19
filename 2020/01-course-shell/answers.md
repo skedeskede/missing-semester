@@ -281,3 +281,74 @@ This is why non-executable source files can still be run by interpreters:
 The general rule: the `x` bit on a script is permission for the file to be
 *launched directly*, not permission for its contents to run. The contents are
 always ultimately executed by an interpreter that has its own `x` bit.
+
+## Exercise 8 — chmod
+
+```bash
+ls -l semester
+-rw-r--r-- 1 lucaf lucaf 61 Aug 19 21:18 semester
+
+chmod u+x semester
+
+ls -l semester
+-rwxr--r-- 1 lucaf lucaf 61 Aug 19 21:18 semester
+```
+
+`chmod` takes two notations. The **symbolic** form used here names who and what:
+`u` (user/owner), `g` (group), `o` (others), `a` (all), combined with `+` to add
+a permission, `-` to remove one, `=` to set exactly. The **numeric** form
+restates the whole mode at once: `chmod 755 semester` would have worked too.
+
+Symbolic is the safer default. `u+x` says only what is changing and leaves
+everything else alone; `755` restates all nine bits, so a mistake silently
+rewrites permissions that were fine.
+
+## Exercise 9 — How the shell knows to use sh
+
+I initially thought that the shell read the shebang. In reality it is the
+**kernel**.
+
+The kernel is the core of the operating system: the program that talks to the
+hardware and controls what every other program is allowed to do. It is always
+running, and nothing else touches disk, memory or CPU directly. The shell is an
+ordinary program with no special powers — it cannot run anything itself, it can
+only ask the kernel to.
+
+The **shebang** is the `#!` on the first line, followed by the path to an
+interpreter. `#!` is a **magic number**: a fixed byte sequence at the start of a
+file that identifies its type. The kernel checks for several; `#!` means
+"interpreted script".
+
+What happens on `./semester`:
+
+1. Bash asks the kernel to execute `/tmp/missing/semester`.
+2. The kernel checks whether `lucaf` may execute that file. This needs `x`,
+   which is what exercise 8 added.
+3. The kernel opens the file, sees `#!` in the first two bytes, and reads the
+   path that follows.
+4. The kernel checks whether `lucaf` may execute `/bin/sh`.
+5. The kernel launches `/bin/sh` with `semester` as its argument.
+
+At the end of the day, in both cases we are running `sh` with `semester` as its
+argument. The only difference is that in the first case the shebang tells the
+kernel which program to use, while in the second case we name `sh` ourselves.
+
+What changes is the permissions required. `./semester` needs `x` on `semester`
+*and* `x` on `/bin/sh`. `sh semester` needs only `x` on `/bin/sh`, plus `r` on
+`semester`, which is opened as data. The direct form is the indirect form plus
+one extra check — which is precisely why mode 644 was enough in exercise 7 and
+not enough in exercise 6.
+
+On the second check: permissions belong to files, not to running programs. The
+question is always whether *the user* may do the thing. Every process runs as
+some user and inherits that identity — the **effective user ID**, which `whoami`
+prints. `/bin/sh` is owned by root with mode `rwxr-xr-x`, so `lucaf` is neither
+owner nor in the owning group and falls through to the last triple. The `x` in
+that final `r-x` is the permission being used.
+
+Note that `/bin/sh` is a symlink — a file that points at another file. On Ubuntu
+it points to `dash`, a smaller and faster shell than bash. `ls -l /bin/sh` shows
+the target.
+
+A file with no shebang cannot be identified by the kernel and execution fails.
+Some shells then retry it themselves as a fallback, which masks the problem.
