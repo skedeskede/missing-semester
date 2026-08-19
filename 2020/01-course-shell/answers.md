@@ -76,46 +76,208 @@ missing file or directory rather than a permissions problem.
 
 ### Attempt 1: what went wrong
 
-[the two commands you ran, the resulting file]
-- Where did line 1 go?
-- Why was line 2 alone in the file? (two independent reasons)
+```bash
+echo #!/bin/sh > semester
+echo curl --head --silent https://missing.csail.mit.edu > semester
+cat semester
+curl --head --silent https://missing.csail.mit.edu
+```
+
+Line 1 has been deleted entirely from the file. Why is that? Two independent
+reasons, both of which had to be fixed:
+
+1. We did not use proper quotation. The `#` marks comments, so everything that
+   follows it was read by the shell as a comment instead of a command.
+2. We used the `>` operator, which deletes everything previously in the file
+   before writing the new content. Even if line 1 had been written correctly,
+   line 2 would have wiped it.
+
+Reason 2 is hypothetical here — see the next section for why.
 
 ### Comment stripping
 
-- What does an unquoted `#` do to the rest of the line?
-- What did the `hello` test prove about `>`?
+As just stated, an unquoted `#` marks the entire rest of the line as a comment.
+To be sure the expression is read as text to be written to `semester`, we need
+to wrap it in single quotation marks (`'`).
+
+**Comment stripping** happens while the shell parses the line, before anything
+is executed. Everything from an unquoted `#` to the end of the line is discarded
+— including any operators sitting after it. We can test whether the `>` in a
+commented-out line still fires:
+
+```bash
+echo hello > semester
+echo #!/bin/sh > semester
+cat semester
+hello
+```
+
+`hello` survived. So the `>` in the second line never ran at all: it was
+stripped along with the comment, and `semester` was never touched. If it had
+run, `hello` would have been gone.
+
+That is why reason 2 above is hypothetical. Line 1 wrote nothing *and* would
+have been overwritten — two separate problems that happened to coincide.
+
+The truncating behaviour of `>` is real, though, and shows up as soon as the
+quoting is fixed:
+
+```bash
+echo hello > semester
+echo '#!/bin/sh' > semester
+cat semester
+#!/bin/sh
+```
+
+Here `hello` is gone. To append instead of truncating, use `>>`:
+
+```bash
+echo hello > semester
+echo '#!/bin/sh' >> semester
+cat semester
+hello
+#!/bin/sh
+```
 
 ### History expansion
 
-- `echo "#!/bin/sh"` — what error, what caused it
-- Which quote style stops it, which doesn't
-- Interactive-only: why does this matter?
+It is important to note the difference between single (`'`) and double (`"`)
+quotation marks.
+
+We successfully wrote the first line to `semester` by wrapping it in single
+quotes. What happens with double quotes instead?
+
+```bash
+echo "#!/bin/sh"
+-bash: !/bin/sh: event not found
+```
+
+The reason is that some characters, like `!`, keep a special meaning even inside
+double quotes. The only way to ensure the line is read as plain text is single
+quotation marks.
+
+The mechanism is called **history expansion**: in interactive bash, `!` followed
+by text means "find a previous command starting with that text and substitute it
+in here". `!!` repeats the last command and `!$` gives its last argument.
+`!/bin/sh` matched nothing, so bash refused the whole line — that is what
+`event not found` means.
+
+Like comment stripping, this happens early, before the redirection is
+considered. So a `>` on the same line would not have saved the command either.
+
+History expansion is **interactive-only**. The same line inside a script runs
+fine. This is a real trap: a command that works in a `.sh` file can break when
+pasted into the terminal.
+
+N.B: In Bash single and double quotation marks are NOT interchangeable. Single
+quotes suppress everything. Double quotes suppress most things — variable
+expansion still happens (`"$HOME"` becomes the path) and history expansion still
+happens.
 
 ### Redirection
 
-- `>` vs `>>`
-- What stdout is, and what `>` actually changes
+The operators `>` and `>>` work by redirecting the output of a command.
+
+In this example we used `echo`, which prints its output to **stdout**. A running
+program has three default channels, called **streams**: *stdin* for input
+(normally the keyboard), *stdout* for output (normally the screen), and *stderr*
+for error messages (also the screen, but a separate channel so errors can be
+handled independently).
+
+What the two operators do is not redefine where `echo` prints to, but redefine
+what stdout *is* — pointing it at a file instead of the terminal. `echo` behaves
+identically either way; it writes to stdout as always, and the shell has already
+changed what stdout is connected to before `echo` starts. This is why
+redirection works with every command without any command needing to know about
+it.
+
+- `>` truncates: empties the file, then writes.
+- `>>` appends: writes at the end, keeping what is there.
+- `<` redirects stdin, feeding a file to a command as if it had been typed.
+
+A note on vocabulary: **expansion** is the general name for the shell rewriting
+your line before executing it. Variable expansion (`$HOME`), history expansion
+(`!`), command substitution (`$(date)` becomes that command's output), and glob
+expansion (`*.txt` becomes a list of filenames) are all kinds of it. The
+unifying idea behind most confusing shell behaviour is that **the command that
+runs is rarely the text you typed**.
 
 ### Working version
 
-[the two commands, the final file]
+```bash
+echo '#!/bin/sh' > semester
+echo 'curl --head --silent https://missing.csail.mit.edu' >> semester
+cat semester
+#!/bin/sh
+curl --head --silent https://missing.csail.mit.edu
+```
+
+Single quotes are not strictly required on line 2 — it contains no `#` and no
+`!`. Quoting by default is the better habit: it means not having to decide,
+line by line, whether anything in the string is special.
 
 ## Exercise 6 — Why ./semester fails
 
-- The error
-- `ls -l` output
-- Mode string broken down: type character, three triples
-- Which character is missing
-- `-rw-r--r--` = 644, and how the digits are derived
+If we simply try to execute the code of exercise 5 by calling `./semester`, from
+`/tmp/missing`, we get:
+
+```bash
+./semester
+-bash: ./semester: Permission denied
+```
+
+We can check the current permissions for `semester` by running `ls -l` from the
+same directory:
+
+```bash
+ls -l
+-rw-r--r-- 1 lucaf lucaf 61 Aug 19 17:01 semester
+```
+
+This reveals that no user of the machine, not even the owner, has execute
+permission (marked by `x`) for the file.
+
+This string of characters is called the **mode**, and it is structured as
+follows:
+
+- The first character denotes the file type: `-` for a regular file, `d` for a
+  directory.
+- The next three characters are the permissions (`rwx`) for the owner of the
+  file. A dash means that permission is absent.
+- The next three are the permissions for the owning group (`lucaf`, here).
+- The final three are for every other user.
+
+These permissions can also be written numerically. `-rw-r--r--` = 644: each
+triple becomes a single digit, the sum of the permissions present, under the
+rule `r` = 4, `w` = 2, `x` = 1. So `rw-` = 6 and `r--` = 4.
+
+This is the same `644` that appeared in git's output when the file was first
+committed — `create mode 100644`.
 
 ## Exercise 7 — Why sh semester works
 
-- Who opens the file in each case
-- Which permission each case requires
-- The general rule about scripts and interpreters
-```
+Unlike exercise 6, in this case we run:
+
+```bash
+sh semester
 ```
 
-One thing to notice: the shell transcripts in exercises 1 and 4 mix commands with their output, tagged `bash`. That's conventional and readable, but a syntax highlighter will try to parse `/bin/bash` as a command. If it looks wrong on GitHub, drop the language tag on transcript blocks and keep it on pure-command blocks.
+This successfully executes the code in `semester`, unlike what happened in
+exercise 6. Why?
 
-Write 5–7 and post the draft.
+The reason is that `sh` is a program that:
+
+1. we have permission to execute (`/bin/sh` is `rwxr-xr-x`), and
+2. only needs to be able to *read* the contents of `semester`, which it can.
+
+So when running a script directly, we need permission to execute it. When
+running it through an **interpreter** — a program that reads source code and
+carries out its instructions, rather than the file being run by the kernel
+itself — we only need permission to read the file as data.
+
+This is why non-executable source files can still be run by interpreters:
+`python script.py` works on a `.py` file with no `x` bit, for the same reason.
+
+The general rule: the `x` bit on a script is permission for the file to be
+*launched directly*, not permission for its contents to run. The contents are
+always ultimately executed by an interpreter that has its own `x` bit.
