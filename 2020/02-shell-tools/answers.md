@@ -529,3 +529,199 @@ Generalises: linters flag real problems and propose fixes blind to context.
 shellcheck doesn't know the file gets sourced. Read the reasoning, not the
 suggestion — the same will apply to `ruff` and `mypy`.
 
+
+## Exercise 3 — Run a script until it fails, capturing output
+
+The task: run a flaky script repeatedly until it fails, capture the failing
+run's stdout and stderr to files, print everything at the end, and report how
+many runs it took.
+
+### Final script
+
+```bash
+#!/usr/bin/env bash
+
+i=1
+while ./script.sh > stdout.txt 2> stderr.txt
+do
+	((i++))
+done
+echo "The script errored during run number $i"
+echo "--- stdout ---"
+cat stdout.txt
+echo "--- stderr ---"
+cat stderr.txt
+```
+
+Output of a real run:
+
+```
+The script errored during run number 44
+--- stdout ---
+Something went wrong
+--- stderr ---
+The error was using magic numbers
+```
+
+### Exit status
+
+Every command that finishes produces an integer called the **exit status** (or
+exit code). By convention `0` means success and any non-zero value means
+failure. The `exit 1` in the given script sets it explicitly; a run that misses
+42 falls through to the final `echo` and exits `0`.
+
+The previous command's exit status is readable from the special variable `$?`.
+It does not appear in the final script because `while CMD` tests that status
+directly: the loop reads it for you. `until CMD` is the exact inverse and would
+have been the other valid skeleton here.
+
+### 1. Loop structure and the logic inversion
+
+`while command` means the condition for the body of the loop to run is that
+`command` runs successfully without erroring. So in this case, if the command
+errors we never enter the body of the loop. Failure-handling code cannot go
+there, because it would never run after a failure.
+
+The corollary is that reaching the line *after* the loop is itself the signal
+that the script failed. That is where the reporting belongs.
+
+### 2. The counter and the off-by-one
+
+The counter is straightforward and I confused myself here. The idea is to make
+sure the run counter aligns with the actual number of runs done, keeping in mind
+that `i` only increases by 1 following a *successful* run.
+
+Because the increment sits in the loop body, and the body only executes on
+success, the counter structurally counts successful runs and never counts the
+failing one. Starting at `i=1` folds the failing run into the initial value, so a
+single in-body increment gives the right total with no post-loop patch.
+
+Bash assignment does no arithmetic: `i=i+1` assigns the literal string `i+1`,
+since a bare word is not a variable reference. `$(( ))` is **arithmetic
+expansion**, evaluating to a value you can use; `(( ))` is **arithmetic
+evaluation** as a statement. Inside either, variables are named without `$`.
+
+### 3. One run per iteration
+
+This one is clear to me conceptually. I simply had no idea where to put the
+redirection in the context of a command used as the condition for a while loop.
+My wrong version called `./script.sh` three times per iteration: once in the
+`while` condition, then twice more inside the body to capture each stream.
+
+Obviously if we run it more than once per loop, the issue is that we are not
+redirecting the stdout and stderr of the command run in the while condition.
+Instead we wipe that away and replace it with the outputs of the commands run
+inside the loop, which may very well fail even when the one in the condition ran
+successfully. Each call rolls its own independent random `n`, so the run being
+tested and the runs being captured are unrelated.
+
+Of course, this is not even the biggest issue here, which is that since the
+condition for the while loop is the script not failing, when the script
+eventually fails we don't even enter the body of the loop, so those additional
+calls and redirections never run. On the one iteration whose output actually
+matters, the capture never happens at all, and the files are left holding output
+from some earlier passing run.
+
+The fix is that the tested run and the captured run must be the same single run.
+Both redirections attach to the `./script.sh` on the `while` line.
+
+### 4. Truncation versus appending
+
+Essentially, if we append with `>>`, our text files will contain a wall of
+messages from successful runs with the failure message buried somewhere in
+there. We would much rather only have the failure message in the log, so `>` is
+the right choice, since it wipes the file clean instead of appending to its
+contents. After the failed run we escape the loop, so `>` doesn't run again and
+we keep the message we want.
+
+This works because of where the redirection binds. A redirection attaches to the
+command it sits inside, and `while ... done` is a **compound command**:
+
+- `while ./script.sh > f` binds to the script, on every iteration. The file is
+  reopened and truncated each time, so it ends holding only the last run.
+- `done > f` binds to the loop as a single unit. The file is opened once and
+  every iteration's output accumulates in it.
+
+Near-identical syntax, opposite behaviour. The per-run form is what makes the
+truncation trick work.
+
+### 5. Two streams, two files
+
+This one is also clear to me, I am simply not familiar with bash syntax. As I
+understand it, it is okay to do here since those are two separate channels that
+do not interact.
+
+A process gets three numbered channels at startup: `0` stdin, `1` stdout, `2`
+stderr. The number is the **file descriptor**, an integer index into the
+kernel's table of open files for that process. `>` is shorthand for `1>`.
+
+So `> stdout.txt 2> stderr.txt` attaches fd 1 and fd 2 to different files on the
+same command, and they cannot collide because they are separate entries in that
+table. This is the same "everything is a file" idea from lecture 1's `/sys`
+exercise.
+
+### 6. Two bugs debugged
+
+#### The invisible character
+
+The script refused to parse:
+
+```
+bash: exercise3.sh: line 5: syntax error near unexpected token `do'
+```
+
+The `do` is flagged as unexpected because the `while` line above it did not
+parse as a valid loop header. The "fake" space appeared, I think, because I
+accidentally pressed a command in the nano editor. To diagnose it we used
+`cat -A`, which prints non-visible characters and made sure of which exact space
+characters we were using. Afterwards I edited the code manually.
+
+```
+whileM-BM-7./script.sh > stdout.txt 2> stderr.txt$
+```
+
+`cat -A` renders otherwise invisible bytes: `$` at line end, `^I` for a tab, and
+`M-` notation for any byte above 127. `M-BM-7` is how it shows the two UTF-8
+bytes `\xc2\xb7`, which is **U+00B7, the middle dot**. Bash does not treat it as
+a word separator, so `while·./script.sh` read as one mashed token.
+
+Worth recording: it was not a non-breaking space, and nano had been rendering it
+literally as `·` the entire time. We both read those dots as nano's own
+whitespace display and missed it for several turns. The editor was showing the
+truth and we had a prior belief about what the display meant. The general
+technique: when a file behaves differently from how it reads, inspect the bytes
+rather than the rendering.
+
+#### Permission denied
+
+```
+The script errored during run number 1
+--- stdout ---
+--- stderr ---
+exercise3.sh: line 4: ./script.sh: Permission denied
+```
+
+Three details in that output point the same way. The count is 1, so the loop
+exited on its first iteration. Both capture files are empty, so the script wrote
+nothing to either stream. And the error line is prefixed `exercise3.sh: line 4:`,
+which means bash itself emitted it rather than `script.sh`. Together these say
+the file was never executed at all: `n` was never rolled, and the loop exited
+because the *attempt* to run the file returned non-zero.
+
+That reading depended on the counter already being correct. A count of 1 with
+empty capture files is only a usable signature if the count can be trusted, which
+is what fixing the off-by-one in section 2 bought.
+
+This is a straightforward case of the user not having permission to execute,
+which I fixed with `chmod u+x script.sh`. Alternatively, we could have used
+`bash script.sh` inside the code to avoid the issue entirely.
+
+Those two options are the lecture 1 distinction again. `./script.sh` is **direct
+execution**: it asks the kernel to execute the file, which requires the execute
+bit and a valid shebang. `bash script.sh` is **interpreter execution**: it runs a
+program we already have permission to execute, which needs only read permission
+on the script, since the file is opened as data. Identical to `./semester` versus
+`sh semester` in lecture 1 exercises 6 and 7.
+
+`chmod u+x` is the better choice for something invoked repeatedly, rather than
+prefixing every call site.
